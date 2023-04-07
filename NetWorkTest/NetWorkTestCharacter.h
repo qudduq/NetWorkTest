@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "NetWorkTestGameMode.h"
 #include "GameFramework/Character.h"
 #include "NetWorkTestCharacter.generated.h"
 
@@ -46,9 +47,6 @@ class ANetWorkTestCharacter : public ACharacter
 public:
 	ANetWorkTestCharacter();
 
-protected:
-	virtual void BeginPlay();
-
 public:
 	/** Sound to play each time we fire */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Gameplay)
@@ -80,36 +78,55 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Gameplay)
 		UForceFeedbackEffect* HitSuccesFeedback;
 
+	UPROPERTY(EditAnywhere)
+		TSubclassOf<class ATestSpawnActor> TestSpawnClass;
+
+public:
+	UPROPERTY(BlueprintReadWrite, Replicated, Category = "Team")
+		ETeam CurrentTeam;
+
 protected:
-	
-	/** Fires a projectile. */
+	class UMaterialInstanceDynamic* DynamicMat;
+	class ANetworkPlayerState* NSPlayerState;
+
+public:
+	class ANetworkPlayerState* GetNSPlayerState();
+	void SetNSPlayerState(class ANetworkPlayerState* newPS);
+	void Respawn();
+
+protected:
 	void OnFire();
-
-	/** Resets HMD orientation and position in VR. */
-	void OnResetVR();
-
-	/** Handles moving forward/backward */
 	void MoveForward(float Val);
-
-	/** Handles stafing movement, left and right */
 	void MoveRight(float Val);
-
-	/**
-	 * Called via input to turn at a given rate.
-	 * @param Rate	This is a normalized rate, i.e. 1.0 means 100% of desired turn rate
-	 */
 	void TurnAtRate(float Rate);
-
-	/**
-	 * Called via input to turn look up/down at a given rate.
-	 * @param Rate	This is a normalized rate, i.e. 1.0 means 100% of desired turn rate
-	 */
 	void LookUpAtRate(float Rate);
-	
+
+	void Fire(const FVector Pos, const FVector dir);
 protected:
-	// APawn interface
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
-	// End of APawn interface
+	virtual float TakeDamage(float DamageAmount, struct FDamageEvent const& DamageEvent, class AController* EventInstigator, AActor* DamageCauser) override;
+
+	virtual void BeginPlay() override;
+	virtual void PossessedBy(AController* NewController) override;
+
+private:
+	UFUNCTION(Reliable, Server, WithValidation)
+		void ServerFire(const FVector Pos, const FVector Dir);
+
+	UFUNCTION(NetMulticast, Unreliable)
+		void MultiShootEffect();
+
+	UFUNCTION(NetMulticast, Unreliable)
+		void MultiCastRagdoll();
+
+	UFUNCTION(Client, Reliable)
+		void PlayPain();
+
+public:
+	UFUNCTION(NetMulticast, Reliable)
+		void SetTeam(ETeam NewTeam);
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 public:
 	/** Returns Mesh1P subobject **/

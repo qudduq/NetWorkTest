@@ -20,7 +20,7 @@ public:
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
-private:
+public:
 	UPROPERTY(Replicated)
 		float Health;
 

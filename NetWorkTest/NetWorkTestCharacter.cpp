@@ -7,11 +7,17 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/InputComponent.h"
 #include "GameFramework/InputSettings.h"
+#include "GameFramework/Character.h"
 #include "HeadMountedDisplayFunctionLibrary.h"
 #include "Kismet/GameplayStatics.h"
 #include "MotionControllerComponent.h"
 #include "XRMotionControllerBase.h" // for FXRMotionControllerBase::RightHandSourceId
 #include "Particles/ParticleSystemComponent.h"
+#include "Net/UnrealNetwork.h"
+#include "DrawDebugHelpers.h"
+#include "NetworkPlayerState.h"
+#include "TestSpawnActor.h"
+#include "Components/SphereComponent.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFPChar, Warning, All);
 
@@ -75,16 +81,7 @@ ANetWorkTestCharacter::ANetWorkTestCharacter()
 
 }
 
-void ANetWorkTestCharacter::BeginPlay()
-{
-	// Call the base class  
-	Super::BeginPlay();
 
-	//Attach gun mesh component to Skeleton, doing it here because the skeleton is not yet created in the constructor
-	FP_Gun->AttachToComponent(FP_Mesh, FAttachmentTransformRules(EAttachmentRule::SnapToTarget, true), TEXT("GripPoint"));
-
-	// Show or hide the two versions of the gun based on whether or not we're using motion controllers.
-}
 
 //////////////////////////////////////////////////////////////////////////
 // Input
@@ -114,22 +111,235 @@ void ANetWorkTestCharacter::SetupPlayerInputComponent(class UInputComponent* Pla
 	PlayerInputComponent->BindAxis("LookUpRate", this, &ANetWorkTestCharacter::LookUpAtRate);
 }
 
-void ANetWorkTestCharacter::OnFire()
+void ANetWorkTestCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
-	
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(ANetWorkTestCharacter, CurrentTeam);
+}
 
-	// try and play the sound if specified
-	if (FireSound != nullptr)
+void ANetWorkTestCharacter::BeginPlay()
+{
+	// Call the base class  
+	Super::BeginPlay();
+
+	if (GetLocalRole() != ROLE_Authority)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, FireSound, GetActorLocation());
+		SetTeam(CurrentTeam);
 	}
 
 }
 
-void ANetWorkTestCharacter::OnResetVR()
+void ANetWorkTestCharacter::SetTeam_Implementation(ETeam NewTeam)
 {
-	UHeadMountedDisplayFunctionLibrary::ResetOrientationAndPosition();
+	FLinearColor OutColor;
+	if(NewTeam == ETeam::BLUE_TEAM)
+	{
+		OutColor = FLinearColor::Blue;
+	}
+	else
+	{
+		OutColor = FLinearColor::Red;
+	}
+
+	if(DynamicMat == nullptr)
+	{
+		DynamicMat = UMaterialInstanceDynamic::Create(GetMesh()->GetMaterial(0), this);
+		DynamicMat->SetVectorParameterValue(TEXT("BodyColor"), OutColor);
+		GetMesh()->SetMaterial(0, DynamicMat);
+		FP_Mesh->SetMaterial(0, DynamicMat);
+	}
 }
+
+ANetworkPlayerState* ANetWorkTestCharacter::GetNSPlayerState()
+{
+	if(NSPlayerState != NULL)
+	{
+		return NSPlayerState;
+	}
+	else
+	{
+		NSPlayerState = Cast<ANetworkPlayerState>(GetPlayerState());
+		return NSPlayerState;
+	}
+}
+
+void ANetWorkTestCharacter::SetNSPlayerState(ANetworkPlayerState* newPS)
+{
+	if(newPS && GetLocalRole() == ROLE_Authority)
+	{
+		NSPlayerState = newPS;
+		SetPlayerState(newPS);
+	}
+}
+
+void ANetWorkTestCharacter::Respawn()
+{
+	if(GetLocalRole() == ROLE_Authority)
+	{
+		NSPlayerState->Health = 100.0f;
+		Cast<ANetWorkTestGameMode>(GetWorld()->GetAuthGameMode())->Respawn(this);
+
+		Destroy(true);
+	}
+}
+
+void ANetWorkTestCharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+
+	NSPlayerState = Cast<ANetworkPlayerState>(GetPlayerState());
+	if(GetLocalRole() == ROLE_Authority && NSPlayerState != nullptr)
+	{
+		NSPlayerState->Health = 100.0f;
+	}
+}
+
+
+void ANetWorkTestCharacter::OnFire()
+{
+	if(FP_FireAnimation != NULL)
+	{
+		UAnimInstance* AnimInstance = FP_Mesh->GetAnimInstance();
+		if(AnimInstance != nullptr)
+		{
+			AnimInstance->Montage_Play(FP_FireAnimation, 1.0f);
+		}
+	}
+
+	if(FP_GunShotParticle != nullptr)
+	{
+		FP_GunShotParticle->Activate(true);
+	}
+
+	FVector mousePos;
+	FVector mouseDir;
+
+	APlayerController* pController = Cast<APlayerController>(GetController());
+	FVector2D ScreenPos = GEngine->GameViewport->Viewport->GetSizeXY();
+
+	pController->DeprojectScreenPositionToWorld(ScreenPos.X / 2.0f, ScreenPos.Y / 2.0f, mousePos, mouseDir);
+	mouseDir *= 10000000.0f;
+
+	ServerFire(mousePos, mouseDir);
+}
+
+void ANetWorkTestCharacter::ServerFire_Implementation(const FVector Pos, const FVector Dir)
+{
+	Fire(Pos, Dir);
+	MultiShootEffect();
+}
+
+bool ANetWorkTestCharacter::ServerFire_Validate(const FVector Pos, const FVector Dir)
+{
+	if (Pos != FVector(ForceInit) && Dir != FVector(ForceInit))
+	{
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+void ANetWorkTestCharacter::Fire(const FVector Pos, const FVector dir)
+{
+	FCollisionObjectQueryParams ObjectQuery;
+	ObjectQuery.AddObjectTypesToQuery(ECC_GameTraceChannel1);
+
+	FCollisionQueryParams ColQuery;
+	ColQuery.AddIgnoredActor(this);
+
+	FHitResult HitResult;
+	GetWorld()->LineTraceSingleByObjectType(HitResult, Pos, dir, ObjectQuery, ColQuery);
+
+	DrawDebugLine(GetWorld(), Pos, dir, FColor::Red, true, 100, 0, 5.0f);
+
+	AActor* actor = GetWorld()->SpawnActor(TestSpawnClass);
+
+	if(HitResult.bBlockingHit)
+	{
+		ANetWorkTestCharacter* OtherChar = Cast<ANetWorkTestCharacter>(HitResult.GetActor());
+		if(OtherChar != nullptr && OtherChar->GetNSPlayerState()->Team != GetNSPlayerState()->Team)
+		{
+			FDamageEvent thisEvent(UDamageType::StaticClass());
+			OtherChar->TakeDamage(10.0f, thisEvent, GetController(), this);
+
+			APlayerController* thisPC = Cast<APlayerController>(GetController());
+			// 클라이언트에 타격에 성공했다고 전해주며 HitSucceFeedback에 저장된 
+			thisPC->ClientPlayForceFeedback(HitSuccesFeedback, false, NAME_None);
+		}
+	}
+}
+
+
+void ANetWorkTestCharacter::MultiShootEffect_Implementation()
+{
+	if(TP_FireAnimation != NULL)
+	{
+		UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance();
+		if(AnimInstance != NULL)
+		{
+			AnimInstance->Montage_Play(TP_FireAnimation, 1.0f);
+		}
+	}
+
+	if(TP_GunShotParticle != nullptr)
+	{
+		TP_GunShotParticle->Activate(true);
+	}
+
+	if(BulletParticle != nullptr)
+	{
+		UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), BulletParticle->Template, BulletParticle->GetComponentLocation(), BulletParticle->GetComponentRotation());
+	}
+}
+
+float ANetWorkTestCharacter::TakeDamage(float DamageAmount, FDamageEvent const& DamageEvent,
+	AController* EventInstigator, AActor* DamageCauser)
+{
+	Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
+
+	if(GetLocalRole() == ROLE_Authority && DamageCauser != this && NSPlayerState->Health > 0)
+	{
+		NSPlayerState->Health -= DamageAmount;
+		PlayPain();
+
+		if(NSPlayerState->Health <= 0)
+		{
+			NSPlayerState->Deaths++;
+
+			MultiCastRagdoll();
+			ANetWorkTestCharacter* otherCharacter = Cast<ANetWorkTestCharacter>(DamageCauser);
+
+			if(otherCharacter)
+			{
+				otherCharacter->NSPlayerState->Score += 1.0f;
+			}
+
+			FTimerHandle thisTimer;
+			GetWorld()->GetTimerManager().SetTimer<ANetWorkTestCharacter>(thisTimer, this, &ANetWorkTestCharacter::Respawn, 3.0f, false);
+
+		}
+	}
+
+	return DamageAmount;
+}
+
+void ANetWorkTestCharacter::PlayPain_Implementation()
+{
+	if(GetLocalRole() == ROLE_Authority)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, PainSound,GetActorLocation());
+	}
+}
+
+void ANetWorkTestCharacter::MultiCastRagdoll_Implementation()
+{
+	GetMesh()->SetPhysicsBlendWeight(1.0f);
+	GetMesh()->SetSimulatePhysics(true);
+	GetMesh()->SetCollisionProfileName("Ragdoll");
+}
+
 
 void ANetWorkTestCharacter::MoveForward(float Value)
 {
@@ -160,3 +370,18 @@ void ANetWorkTestCharacter::LookUpAtRate(float Rate)
 	// calculate delta for this frame from the rate information
 	AddControllerPitchInput(Rate * 1 * GetWorld()->GetDeltaSeconds());
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
